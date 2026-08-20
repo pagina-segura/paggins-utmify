@@ -1,19 +1,26 @@
-PAGGINS -> UTMIFY — SERVIÇO SEPARADO
+PAGGINS -> UTMIFY BRIDGE V2
 
-Este projeto NÃO faz parte do app Lotto Money.
-Ele é apenas uma ponte independente:
+O QUE MUDOU:
+- CID recebido da Paggins agora volta para a UTMify como SCK.
+- Status em português e inglês são reconhecidos.
+- Log mostra se CID chegou.
+- O endpoint permanece /paggins.
+- A URL de postback da Paggins NÃO precisa mudar.
 
-Paggins -> este serviço -> UTMify
+NO RAILWAY:
+Mantenha:
+UTMIFY_API_TOKEN=seu token atual
 
-PASSOS:
-1. Crie um NOVO serviço/projeto separado no Railway chamado paggins-utmify.
-2. Publique estes arquivos nesse serviço.
-3. No Railway, adicione:
-   UTMIFY_API_TOKEN=SEU_TOKEN_NOVO_DA_UTMIFY
-4. Gere o domínio público do serviço.
-5. Use esse domínio na Postback URL da Paggins.
+Substitua os arquivos do repositório pelos arquivos deste pacote e faça redeploy.
 
-Exemplo:
+POSTBACK URL DA PAGGINS:
 https://paggins-utmify-production.up.railway.app/paggins?cid={cid}&total_price={total_price}&amount_net={amount_net}&amount_gross={amount_gross}&currency={currency}&order_id={order_id}&order_date={order_date}&order_status={order_status}&customer_email={customer_email}&customer_name={customer_name}&customer_phone={customer_phone}&product_id={product_id}&product_name={product_name}&quantity={quantity}
 
-Não altere o app/entregável.
+FLUXO:
+UTMify gera SCK
+-> página repassa SCK ao checkout
+-> script da VSL duplica SCK como CID
+-> Paggins recebe CID
+-> Paggins dispara S2S
+-> bridge recebe CID
+-> bridge envia CID de volta como SCK para UTMify

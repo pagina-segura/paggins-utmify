@@ -5,130 +5,158 @@ app.use(express.json({ limit: "256kb" }));
 
 const UTMIFY_ENDPOINT = "https://api.utmify.com.br/api-credentials/orders";
 
-function asText(value) {
+function str(value) {
   if (value === undefined || value === null) return "";
   return String(value).trim();
 }
 
-function toCents(value) {
-  const raw = asText(value);
+function moneyToCents(value) {
+  let raw = str(value);
   if (!raw) return 0;
 
-  // Handles values like 197, 197.00, 197,00, 1,234.56
-  let normalized = raw.replace(/[^\d,.-]/g, "");
-  if (normalized.includes(",") && normalized.includes(".")) {
-    normalized = normalized.replace(/,/g, "");
-  } else if (normalized.includes(",") && !normalized.includes(".")) {
-    normalized = normalized.replace(",", ".");
+  raw = raw.replace(/[^\d,.-]/g, "");
+
+  if (raw.includes(",") && raw.includes(".")) {
+    raw = raw.replace(/,/g, "");
+  } else if (raw.includes(",")) {
+    raw = raw.replace(",", ".");
   }
 
-  const number = Number(normalized);
-  if (!Number.isFinite(number)) return 0;
-  return Math.round(number * 100);
+  const amount = Number(raw);
+  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
 }
 
-function toUtcDate(value) {
-  const raw = asText(value);
-  const date = raw ? new Date(raw) : new Date();
+function utc(value) {
+  let d = value ? new Date(value) : new Date();
+  if (Number.isNaN(d.getTime())) d = new Date();
 
-  if (Number.isNaN(date.getTime())) {
-    return formatUtc(new Date());
-  }
-  return formatUtc(date);
-}
-
-function formatUtc(date) {
   const pad = (n) => String(n).padStart(2, "0");
-  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+
+  return (
+    d.getUTCFullYear() + "-" +
+    pad(d.getUTCMonth() + 1) + "-" +
+    pad(d.getUTCDate()) + " " +
+    pad(d.getUTCHours()) + ":" +
+    pad(d.getUTCMinutes()) + ":" +
+    pad(d.getUTCSeconds())
+  );
 }
 
-function mapStatus(value) {
-  const status = asText(value).toLowerCase();
+function normalizeStatus(value) {
+  const s = str(value).toLowerCase().trim();
 
-  if (["paid", "approved", "complete", "completed", "success", "succeeded"].includes(status)) {
-    return "paid";
-  }
-  if (["refunded", "refund", "reimbursed"].includes(status)) {
-    return "refunded";
-  }
-  if (["chargeback", "chargedback"].includes(status)) {
-    return "chargedback";
-  }
-  if (["refused", "declined", "failed", "canceled", "cancelled"].includes(status)) {
-    return "refused";
-  }
+  const paid = [
+    "paid", "pago", "approved", "aprovado",
+    "processed", "processado", "completed", "complete",
+    "success", "succeeded"
+  ];
+
+  const refunded = [
+    "refunded", "refund", "reembolsado", "reembolso",
+    "reimbursed"
+  ];
+
+  const chargeback = [
+    "chargeback", "chargedback", "charged_back"
+  ];
+
+  const refused = [
+    "refused", "declined", "recusado", "failed",
+    "erro no pagamento", "payment_error",
+    "canceled", "cancelled", "cancelado"
+  ];
+
+  if (paid.includes(s)) return "paid";
+  if (refunded.includes(s)) return "refunded";
+  if (chargeback.includes(s)) return "chargedback";
+  if (refused.includes(s)) return "refused";
+
   return "waiting_payment";
 }
 
-async function handlePaggins(req, res) {
+async function handler(req, res) {
   try {
     const token = process.env.UTMIFY_API_TOKEN;
+
     if (!token) {
-      console.error("UTMIFY_API_TOKEN is missing");
+      console.error("UTMIFY_API_TOKEN missing");
       return res.status(500).json({ ok: false, error: "UTMIFY_API_TOKEN missing" });
     }
 
-    const q = { ...req.query, ...(req.body || {}) };
+    const data = { ...req.query, ...(req.body || {}) };
 
-    const orderId = asText(q.order_id);
-    const orderStatus = mapStatus(q.order_status);
-    const createdAt = toUtcDate(q.order_date);
+    const orderId = str(data.order_id);
+    const rawStatus = str(data.order_status);
+    const mappedStatus = normalizeStatus(rawStatus);
+    const cid = str(data.cid);
 
-    if (!orderId) {
-      return res.status(400).json({ ok: false, error: "order_id missing" });
+    // Evita considerar como pedido um teste contendo macro literal.
+    if (!orderId || orderId === "{order_id}") {
+      console.error("Invalid order_id received:", orderId);
+      return res.status(400).json({ ok: false, error: "invalid order_id" });
     }
 
-    const totalPriceInCents = toCents(q.total_price || q.amount_gross);
-    const grossInCents = toCents(q.amount_gross || q.total_price);
-    const netInCents = toCents(q.amount_net || q.amount_gross || q.total_price);
-    const gatewayFeeInCents = Math.max(0, grossInCents - netInCents);
+    const createdAt = utc(data.order_date);
 
-    const quantityRaw = parseInt(asText(q.quantity), 10);
-    const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? quantityRaw : 1;
+    const totalCents = moneyToCents(data.total_price || data.amount_gross);
+    const grossCents = moneyToCents(data.amount_gross || data.total_price);
+    const netCents = moneyToCents(data.amount_net || data.amount_gross || data.total_price);
+    const feeCents = Math.max(0, grossCents - netCents);
 
-    const nowUtc = formatUtc(new Date());
+    let quantity = parseInt(str(data.quantity), 10);
+    if (!Number.isFinite(quantity) || quantity < 1) quantity = 1;
+
+    const currencyRaw = str(data.currency).toUpperCase();
+    const acceptedCurrencies = ["BRL", "USD", "EUR", "GBP", "ARS", "CAD"];
+    const currency = acceptedCurrencies.includes(currencyRaw) ? currencyRaw : "USD";
 
     const payload = {
       orderId,
       platform: "Paggins",
       paymentMethod: "credit_card",
-      status: orderStatus,
+      status: mappedStatus,
       createdAt,
-      approvedDate: orderStatus === "paid" ? createdAt : null,
-      refundedAt: orderStatus === "refunded" ? nowUtc : null,
+      approvedDate: mappedStatus === "paid" ? createdAt : null,
+      refundedAt: mappedStatus === "refunded" ? utc() : null,
+
       customer: {
-        name: asText(q.customer_name) || "Customer",
-        email: asText(q.customer_email) || "unknown@example.com",
-        phone: asText(q.customer_phone) || null,
+        name: str(data.customer_name) || "Customer",
+        email: str(data.customer_email) || "unknown@example.com",
+        phone: str(data.customer_phone) || null,
         document: null
       },
+
       products: [
         {
-          id: asText(q.product_id) || "paggins-product",
-          name: asText(q.product_name) || "Paggins Product",
+          id: str(data.product_id) || "paggins-product",
+          name: str(data.product_name) || "Paggins Product",
           planId: null,
           planName: null,
           quantity,
-          priceInCents: totalPriceInCents
+          priceInCents: totalCents
         }
       ],
+
+      // IMPORTANTE:
+      // Na VSL, o CID da Paggins recebe uma cópia do SCK da UTMify.
+      // Aqui devolvemos esse mesmo valor como SCK para a UTMify.
       trackingParameters: {
-        src: asText(q.cid) || null,
-        sck: null,
+        src: null,
+        sck: cid || null,
         utm_source: null,
         utm_campaign: null,
         utm_medium: null,
         utm_content: null,
         utm_term: null
       },
+
       commission: {
-        totalPriceInCents,
-        gatewayFeeInCents,
-        userCommissionInCents: netInCents || totalPriceInCents,
-        currency: ["BRL", "USD", "EUR", "GBP", "ARS", "CAD"].includes(asText(q.currency).toUpperCase())
-          ? asText(q.currency).toUpperCase()
-          : "USD"
+        totalPriceInCents: totalCents,
+        gatewayFeeInCents: feeCents,
+        userCommissionInCents: netCents || totalCents,
+        currency
       },
+
       isTest: false
     };
 
@@ -145,20 +173,27 @@ async function handlePaggins(req, res) {
 
     console.log("Paggins -> UTMify", {
       orderId,
-      status: orderStatus,
+      rawStatus,
+      mappedStatus,
+      hasCid: Boolean(cid),
       utmifyStatus: response.status
     });
 
     if (!response.ok) {
-      console.error("UTMify error:", response.status, responseText);
+      console.error("UTMify rejected order:", response.status, responseText);
       return res.status(502).json({
         ok: false,
-        error: "UTMify rejected the order",
+        error: "UTMify rejected order",
         status: response.status
       });
     }
 
-    return res.status(200).json({ ok: true, orderId });
+    return res.status(200).json({
+      ok: true,
+      orderId,
+      status: mappedStatus,
+      tracked: Boolean(cid)
+    });
   } catch (error) {
     console.error("Bridge error:", error);
     return res.status(500).json({ ok: false, error: "Internal error" });
@@ -166,15 +201,14 @@ async function handlePaggins(req, res) {
 }
 
 app.get("/", (req, res) => {
-  res.status(200).send("Paggins -> UTMify bridge online");
+  res.status(200).send("Paggins -> UTMify bridge v2 online");
 });
 
-app.get("/paggins", handlePaggins);
-app.post("/paggins", handlePaggins);
-app.get("/api/paggins-utmfy", handlePaggins);
-app.post("/api/paggins-utmfy", handlePaggins);
+app.get("/paggins", handler);
+app.post("/paggins", handler);
 
 const port = process.env.PORT || 3000;
+
 app.listen(port, () => {
-  console.log(`Bridge running on port ${port}`);
+  console.log(`Bridge v2 running on port ${port}`);
 });
